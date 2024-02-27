@@ -214,32 +214,39 @@ table(is.na(conslyon2$geometry.coordinates))
 ```
 
 ```{r}
-t <- st_read("https://data.geopf.fr/wfs/ows?SERVICE=WFS&REQUEST=GetFeature&VERSION=2.0.0&typeName=CADASTRALPARCELS.PARCELLAIRE_EXPRESS:arrondissement")
-
-arr <-
-  t %>%
-  filter(str_starts(code_insee, "69"))
-
-
-
-arr <- arr %>%
+arr <- st_read("https://data.geopf.fr/wfs/ows?SERVICE=WFS&REQUEST=GetFeature&VERSION=2.0.0&typeName=CADASTRALPARCELS.PARCELLAIRE_EXPRESS:arrondissement") %>%
+  filter(str_starts(code_insee, "69")) %>%
   st_cast("GEOMETRYCOLLECTION") %>%
   st_collection_extract("POLYGON")
 
-mf_map(arr)
-mf_map(sf_conslyon, add = T)
-
-
-sf_conslyon <- st_as_sf(t,
-                        coords = c("geometry.coordinates_1",
-                                   "geometry.coordinates_2"))
-
-
-t <- conslyon %>%
+conslyon_coord <- 
+  conslyon %>%
   unnest_wider(geometry.coordinates,
                names_sep = "_") %>%
   filter(!is.na(geometry.coordinates_1))
 
+sf_conslyon <- st_as_sf(conslyon_coord,
+                        coords = c("geometry.coordinates_1",
+                                   "geometry.coordinates_2"))
 
+
+mf_map(arr)
+mf_map(sf_conslyon, add = T)
 ```
+
+```{r}
+con <-
+  DBI::dbConnect(RPostgres::Postgres(),
+                 host = "postgresql-990179.user-aubinpoissonnier",
+                 dbname = "defaultdb",
+                 user = "user-aubinpoissonnier",
+                 password = "4ldcu5218n7y6twxk3eg"
+                  )
+
+
+df <- tbl(con, in_schema("dvf", "adresse"))
+parc <- tbl(con, in_schema("dvf", "parcelle"))
+```
+
+
 
