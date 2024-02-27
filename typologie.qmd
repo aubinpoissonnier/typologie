@@ -11,6 +11,12 @@ editor_options:
 library(httr)
 library(tidyverse)
 library(jsonlite)
+
+install.packages("sf")
+library(sf)
+
+install.packages("mapsf")
+library(mapsf)
 ```
 
 # Sitadel
@@ -52,46 +58,6 @@ cons69 <- read_csv2("cons69.csv")
 
 
 # Géocodage
-```{r API_geocodage}
-# API Géocodage pour récupérer les données du parcellaire express
-## Formation de l'URL
-
-### Base
-base <- "https://wxs.ign.fr/essentiels/geoportail/geocodage/rest/0.1/search?q="
-
-### Type de données
-index <- "&index=parcel"
-
-### Code département
-depcode <- "&departmentcode=69"
-
-### Municipalité
-mun <- "&municipalitycode=381"
-
-### Arrondissement
-arr <- "&districtcode=381"
-
-### Section
-sec <- "&section=AV"
-
-### Numéro
-number <- "&number=0025"
-
-
-url <- paste0(base, index, depcode, arr, sec, number)
-
-## Collecte
-res <- httr::content(
-  httr::GET(url),             # url correspond à l'url à interroger
-  as = "text",                # type de la sortie renvoyée
-  httr::content_type_json(),  # type de la réponse de l'url
-  encoding = "UTF-8"          # encodage de la réponse de l'url
-)
-
-```
-
-
-
 ```{r}
 # Jointure API géocodage et base SITADEL de Lyon
 ## Création d'une variable url pour les constructions
@@ -105,6 +71,7 @@ index <- "&index=parcel"
 cons69 <-
   cons69 %>%
   mutate(
+    ## URL à partir de la parcelle
     # Département
     depcode = paste0("&departmentcode=", DEP_CODE),
     # Arrondissement
@@ -125,9 +92,25 @@ cons69 <-
     # URL final
     url_parc = 
       paste0(base, index, depcode, arr, sec, number),
-    # ID de la parcelle cadastrale pour la jointure consécutive
-    id = paste0(DEP_CODE, str_sub(NUM_DAU, 4, 6), "000", SEC_CADASTRE1, str_pad(NUM_CADASTRE1, width = 4, pad = "0"))
-  )
+    ## URL à partir de l'adresse
+    # Information sur l'adresse
+    # Première transformation
+    adresse = 
+      if_else(
+        # Si le numéro est dans le libellé
+        str_detect(ADR_LIBVOIE_TER, "\\d"),
+        # Alors garde seulement le libellé
+        ADR_LIBVOIE_TER,
+        # Sinon cherche le numéro dans la colonne
+        paste0(ADR_NUM_TER, " ", ADR_LIBVOIE_TER)),
+    # Deuxième transformation
+    # Remplace tous les espaces par des %
+    adresse = str_replace_all(adresse, " ", "%"),
+    # URL final, limité à 1 résultat
+    url_adresse = paste0(base, adresse, "%6900", str_sub(NUM_DAU, 6, 6), "%Lyon", "&type=housenumber", "&limit=1"),
+    # On ne cherche pas les constructions sans numéro de rue
+    url_adresse = if_else(str_detect(url_adresse, "NA"), NA, url_adresse)
+    )
 
 ### Filtre Lyon intra-muros et professionnels
 conslyon <- 
@@ -135,90 +118,128 @@ conslyon <-
   filter(COMM == 69123 &
            str_starts(CAT_DEM, "3"))
 
-### Nombre de parcelles différentes
-length(unique(conslyon$id))
 
+### On créer des identifiants
+conslyon <-
+  conslyon %>%
+  rowid_to_column("ID")
 
 ## Récupérer les coordonnées géographiques par l'API
 ### Fonction
 myget <-
   function(url_parc) {
-    httr::content(
-  httr::GET(url),             # url correspond à l'url à interroger
+    # Récupération de l'information
+      httr::content(
+  httr::GET(url_parc),             # url correspond à l'url à interroger
   as = "text",                # type de la sortie renvoyée
   httr::content_type_json(),  # type de la réponse de l'url
   encoding = "UTF-8"          # encodage de la réponse de l'url
-)
+) %>%
+      # Traduction du format JSON
+      jsonlite::fromJSON(., flatten = T) %>%
+      # Dont on ne garde que l'élément features qui est un data.frame
+      pluck("features")
   }
 
 ### Fonction appliquée aux URL de chaque construction
-res <- lapply(conslyon$url, myget)
+res_parc <- 
+  map2(
+    # Argument 1 : les url
+    .x = conslyon$url_parc,
+    # Argument 2 = les identifiants
+    .y = conslyon$ID,
+    # Fonction : 
+    .f = ~ 
+      # Jointure de deux data.frame
+      cbind(
+        # Le data.frame du géocodage
+        myget(.x), 
+        # La colonne de l'identifiant
+        "ID" = .y))
 
-### Extraction des informations et mises sous forme de dataframe
-res2 <-
-  map(
-    res,
-    function(x){
-      jsonlite::fromJSON(x,
-                         flatten = T)$features
-    }
-  ) %>%
+### On ne garde que les constructions dont on a retrouvé la localisation
+res_parc <- res_parc[map(res_parc, length) == 15] %>%
   bind_rows()
 
+# Géocodage par l'adresse
+## Variable de filtre
+conslyon <-
+  conslyon %>%
+  mutate(besoin_adresse = !(ID %in% res_parc$ID))
 
-## Faire la jointure
+## Même fonction appliquée aux seules lignes nécessaires
+res_adr <- 
+  map2(
+    # Argument 1 : les url
+    .x = conslyon %>%
+      filter(besoin_adresse & !is.na(url_adresse)) %>%
+      pull(url_adresse),
+    # Argument 2 = les identifiants
+    .y = conslyon %>%
+      filter(besoin_adresse & !is.na(url_adresse)) %>%
+      pull(ID),
+    # Fonction : 
+    .f = ~ 
+      # Jointure de deux data.frame
+      cbind(
+        # Le data.frame du géocodage
+        myget(.x), 
+        # La colonne de l'identifiant
+        "ID" = .y))
+
+res_adr <- res_adr %>%
+  bind_rows() %>%
+  filter(properties.type == "housenumber")
+
+
+head(res_adr)
+
+
+### Faire la jointure des deux listes
+res <-
+  rbind(
+    select(res_parc, ID, geometry.coordinates),
+    select(res_adr, ID, geometry.coordinates)
+  ) %>%
+  arrange(ID)
+
+### Faire la jointure avec les constructions
 conslyon <-
   left_join(conslyon,
-          res2, 
-          by = c("id" = "properties.id"))
+          res, 
+          by = "ID")
+
+### Nombre de parcelles non situées
+table(is.na(conslyon2$geometry.coordinates))
+```
+
+```{r}
+t <- st_read("https://data.geopf.fr/wfs/ows?SERVICE=WFS&REQUEST=GetFeature&VERSION=2.0.0&typeName=CADASTRALPARCELS.PARCELLAIRE_EXPRESS:arrondissement")
+
+arr <-
+  t %>%
+  filter(str_starts(code_insee, "69"))
 
 
 
-## Nombre de parcelles non situées
-table(conslyon$id %in% res2$properties.id)
+arr <- arr %>%
+  st_cast("GEOMETRYCOLLECTION") %>%
+  st_collection_extract("POLYGON")
+
+mf_map(arr)
+mf_map(sf_conslyon, add = T)
+
+
+sf_conslyon <- st_as_sf(t,
+                        coords = c("geometry.coordinates_1",
+                                   "geometry.coordinates_2"))
+
 
 t <- conslyon %>%
-  filter(!(id %in% res2$properties.id))
-
-# Géocodage par l'adresse
-conslyon <-
-  conslyon %>%
-  mutate(
-    besoin_adresse = !(id %in% res2$properties.id),
-    adresse = 
-      if_else(
-        str_detect(ADR_LIBVOIE_TER, "\\d"),
-        ADR_LIBVOIE_TER,
-        paste0(ADR_NUM_TER, " ", ADR_LIBVOIE_TER)),
-    adresse = str_replace_all(adresse, " ", "%"),
-    url_adresse = paste0(base, adresse, "%6900", str_sub(NUM_DAU, 6, 6), "%Lyon", "&type=housenumber", "&limit=1"),
-    url_adresse = if_else(str_detect(url_adresse, "NA"), NA, url_adresse))
-
-conslyon <-
-  conslyon %>%
-  rowid_to_column("index")
-
-
-
-
-
-
-
-res3 <- 
-  conslyon %>%
-  filter(besoin_adresse &
-           !is.na(url_adresse)) %>%
-  pull(url_adresse, index) 
-
-%>%
-  map(.f = ~ myget(.)) %>%
-  map(.f = ~ jsonlite::fromJSON(., flatten = T)$features) %>%
-  bind_rows() %>%
-  filter(properties.type != "street")
+  unnest_wider(geometry.coordinates,
+               names_sep = "_") %>%
+  filter(!is.na(geometry.coordinates_1))
 
 
 ```
-
-
-
 
