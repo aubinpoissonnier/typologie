@@ -1,0 +1,323 @@
+---
+title: "typologie_api"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+# Installation des packages
+
+```{r}
+# Package names
+packages <- c("httr2", "tidyverse", "jsonlite", "sf", "geojsonsf", "mapsf")
+
+# Install packages not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed_packages])
+}
+
+# Packages loading
+invisible(lapply(packages, library, character.only = TRUE))
+```
+
+# Fonds de carte parcellaire
+
+L'obtention du fond de carte est réalisée à l'aide du flux WFS du produit IGN PARCELAIRE-EXPRESS. Il faut pour cela construire une URL composée de :
+
+-   Le service en ligne d'accès au flux
+
+-   Une requête `GetFeature` pour indiquer qu'on souhaite obtenir le contenu
+
+-   Spécifier le produit recherché : CADASTRALPARCELS.PARCELLAIRE_EXPRESS:feuille
+
+-   En projection sous le système de coordonnées de référence EPSG:4326
+
+-   Un filtre CQL qui ne sélectionne que les entités dont l'attribut `code_insee` est égal au code INSEE de la commune, soit pour la commune de Lyon `69123`
+
+```{r}
+# Base de l'url
+wfs_cadastre <- "https://data.geopf.fr/wfs/ows"
+
+# Construction de l'url
+# Partant de la base
+url <- wfs_cadastre |> 
+  # Décomposée sous un format liste
+  url_parse() |>
+  # À laquelle on rajoute les éléments supplémentaires
+  list_merge(
+    # Les requêtes
+    query = 
+      list(
+        service = "wfs",
+        version = "2.0.0",
+        request = "GetFeature",
+        typename = "CADASTRALPARCELS.PARCELLAIRE_EXPRESS:feuille",
+        srsName = "EPSG:4326",
+        CQL_FILTER = "code_insee=69123"),
+  ) |>
+  # Compilation des éléments de l'url
+  url_build()
+
+# Téléchargement et création de l'objet spatial
+cad_lyon <- st_read(url)
+
+# Transformation de l'objet (bug d'origine inconnue)
+cad_lyon <- 
+  cad_lyon %>%
+  st_cast("GEOMETRYCOLLECTION") %>%
+  st_collection_extract("POLYGON")
+```
+
+# Sitadel
+
+Il faut dans un premier temps récupérer les données de la construction SITADEL à partir de l'API DIDO du ministère du logement. On accède ainsi au millésime le plus récent, filtré pour les données du rhône, transformé en format CSV.
+
+```{r API_sitadel}
+# API Dido pour récupérer les données de sitadel
+# Formation de l'URL
+# Base
+base <- "https://data.statistiques.developpement-durable.gouv.fr:443/dido/api/v1/datafiles/8b35affb-55fc-4c1f-915b-7750f974446a/csv"
+
+
+# Construction de l'url
+url <- 
+  base |>
+  url_parse() |>
+  list_merge(
+    query =
+      list(
+      millesime = "2024-01",
+      # Paramètres obligatoires
+      withColumnName = "true",
+      withColumnDescription = "false",
+      withColumnUnit = "false",
+      # Département du rhône
+      COMM = "contains:69123"
+      )
+  ) |>
+  url_build()
+
+# Collecte des données
+# Création d'une requête
+req <- request(url)
+# Lancement de la requête
+resp <- req_perform(req)
+# Lecture du contenu et création du data.frame
+conslyon <- resp |> 
+  resp_body_string() |>
+  read_csv2()
+```
+
+# Géocodage
+
+```{r}
+# Jointure API géocodage et base SITADEL de Lyon
+## Création d'une variable url pour les constructions
+### Base
+base <- "https://wxs.ign.fr/essentiels/geoportail/geocodage/rest/0.1/search?q="
+
+### Type de données
+index <- "&index=parcel"
+
+### Filtre promoteurs et assimilés
+conslyon <- 
+  conslyon %>%
+  filter(str_starts(CAT_DEM, "3"))
+
+### Parcelle cadastrale des constructions
+conslyon <-
+  conslyon %>%
+  mutate(
+    ## URL à partir de la parcelle
+    # Département
+    depcode = paste0("&departmentcode=", DEP_CODE),
+    # Arrondissement
+    arr = paste0("&districtcode=", str_sub(NUM_DAU, 4, 6)),
+    # Section cadastrale
+    sec = paste0("&section=", SEC_CADASTRE1),
+    # Numéro
+    number = paste0("&number=", 
+                    # Ajusté à la taille de 4 caractères
+                    str_pad(NUM_CADASTRE1, width = 4, pad = "0")),
+    # URL final
+    url_parc = 
+      paste0(base, index, depcode, arr, sec, number),
+    ## URL à partir de l'adresse
+    # Information sur l'adresse
+    # Première transformation
+    adresse = 
+      if_else(
+        # Si le numéro est dans le libellé
+        str_detect(ADR_LIBVOIE_TER, "\\d"),
+        # Alors garde seulement le libellé
+        ADR_LIBVOIE_TER,
+        # Sinon cherche le numéro dans la colonne
+        paste0(ADR_NUM_TER, " ", ADR_LIBVOIE_TER)),
+    # Deuxième transformation
+    # Remplace tous les espaces par des %
+    adresse = str_replace_all(adresse, " ", "%"),
+    # URL final, limité à 1 résultat
+    url_adresse = paste0(base, adresse, "%6900", str_sub(NUM_DAU, 6, 6), "%Lyon", "&type=housenumber", "&limit=1"),
+    # On ne cherche pas les constructions sans numéro de rue
+    url_adresse = if_else(str_detect(url_adresse, "NA"), NA, url_adresse)
+    )
+
+### On créer des identifiants
+conslyon <-
+  conslyon %>%
+  rowid_to_column("ID")
+
+## Récupérer les coordonnées géographiques par l'API
+### Fonction
+myget <-
+  function(url_parc) {
+    # Récupération de l'information
+      httr::content(
+  httr::GET(url_parc),             # url correspond à l'url à interroger
+  as = "text",                # type de la sortie renvoyée
+  httr::content_type_json(),  # type de la réponse de l'url
+  encoding = "UTF-8"          # encodage de la réponse de l'url
+) %>%
+      # Traduction du format JSON
+      jsonlite::fromJSON(., flatten = T) %>%
+      # Dont on ne garde que l'élément features qui est un data.frame
+      pluck("features")
+  }
+
+### Fonction appliquée aux URL de chaque construction
+res_parc <- 
+  map2(
+    # Argument 1 : les url
+    .x = conslyon$url_parc,
+    # Argument 2 = les identifiants
+    .y = conslyon$ID,
+    # Fonction : 
+    .f = ~ 
+      # Jointure de deux data.frame
+      cbind(
+        # Le data.frame du géocodage
+        myget(.x), 
+        # La colonne de l'identifiant
+        "ID" = .y))
+
+### On ne garde que les constructions dont on a retrouvé la localisation
+res_parc <- res_parc[map(res_parc, length) == 15] %>%
+  bind_rows()
+
+# Géocodage par l'adresse
+## Variable de filtre
+conslyon <-
+  conslyon %>%
+  mutate(besoin_adresse = !(ID %in% res_parc$ID))
+
+## Même fonction appliquée aux seules lignes nécessaires
+res_adr <- 
+  map2(
+    # Argument 1 : les url
+    .x = conslyon %>%
+      filter(besoin_adresse & !is.na(url_adresse)) %>%
+      pull(url_adresse),
+    # Argument 2 = les identifiants
+    .y = conslyon %>%
+      filter(besoin_adresse & !is.na(url_adresse)) %>%
+      pull(ID),
+    # Fonction : 
+    .f = ~ 
+      # Jointure de deux data.frame
+      cbind(
+        # Le data.frame du géocodage
+        myget(.x), 
+        # La colonne de l'identifiant
+        "ID" = .y))
+
+res_adr <- res_adr %>%
+  bind_rows() %>%
+  filter(properties.type == "housenumber")
+
+
+### Faire la jointure des deux listes
+res <-
+  rbind(
+    select(res_parc, ID, geometry.coordinates),
+    select(res_adr, ID, geometry.coordinates)
+  ) %>%
+  arrange(ID)
+
+### Faire la jointure avec les constructions
+conslyon <-
+  left_join(conslyon,
+          res, 
+          by = "ID")
+```
+
+# DVF
+
+Les données DVF+ sont récupérées par l'intermédiaire de l'API du Cerema, qui offre une géolocalisation des mutations.
+
+```{r}
+# Base de l'url
+dvf_open <- "https://apidf-preprod.cerema.fr/dvf_opendata/geomutations/"
+
+# Construction de l'url
+# Partant de la base
+url <- dvf_open |> 
+  # Décomposée sous un format liste
+  url_parse() |>
+  # À laquelle on rajoute les éléments supplémentaires
+  list_merge(
+    # Les requêtes
+    query = 
+      list(
+        code_insee = paste0(69381:69389, collapse = ","),
+        page_size = "1000",
+        # Les appartements uniquement
+        codtypbien = "121",
+        vefa = "True"
+        ),
+  ) |>
+  # Compilation des éléments de l'url
+  url_build()
+
+# Collecte des données
+# Création d'une première requête des 500 entrées de la première page
+req <- request(url)
+resp1 <- req_perform(req) |>
+  resp_body_json()
+   
+# Création d'une liste d'url pour toutes les pages
+urls <- paste0(url,
+       "&page=",
+       seq(
+         # De la première page
+         1,
+         # À la dernière (nb entités/entités par page + 1)
+         (resp1$count/500)+1))
+
+# Créations des requêtes
+reqs <- 
+  map(.x = urls,
+      .f = ~ request(.))
+# Téléchargement des données
+resps <- 
+  req_perform_parallel(
+    reqs
+  )
+
+# Création de l'objet spatial
+dvflyon <- 
+  resps |>
+  map_chr(resp_body_string) |>
+  str_c() |>
+  geojson_sf()
+
+dvflyon %>%
+  count(idopendata)
+
+
+mf_map(filter(arr, nom_arr == "LYON 4EME"))
+mf_map(lyon1, add = T)
+mf_map(filter(sf_conslyon, str_detect(NUM_DAU, "384") & NB_LGT_COL_HORS_RES > 5), add = T)
+
+```
