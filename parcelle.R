@@ -177,57 +177,57 @@ conslyon <-
 
 # Base de l'url
 base <- "https://wxs.ign.fr/essentiels/geoportail/geocodage/rest/0.1/search?q="
-
-urls <-
-    base |> 
-  # Décomposée sous un format liste
-  url_parse() |>
-  # À laquelle on rajoute les éléments supplémentaires
-  list_merge(
-    # Les requêtes
-    query = 
-      list(
-        index = "address",
-        limit = "1",
-        citycode = list(conslyon$COMM)),
-  ) |>
-  # Compilation des éléments de l'url
-  url_build()
-
-
-conslyon %>%
-  mutate(
-        query = 
-          list(
-            q = adresse,
-            index = "address",
-            limit = "1",
-            citycode = COMM)
-  )
-
+list_base <-
+  map(rep(base, 310),
+      .f = ~ url_parse(.x))
 
 query <- 
   list(
-    q = conslyon$adresse,
-    index = rep("address", dim(conslyon)[1]), 
-    limit = rep("1", dim(conslyon)[1]),
-    citycode = conslyon$COMM)
-
-
-t <- 
-  map(
-    .x = query,
-    .f =
-      base |>
-      url_parse() |>
-      list_merge(
-        list(
-          adresse = .[1],
-        )
-      )
+    q = filter(conslyon, !str_detect(adresse, "NA"))$adresse,
+    index = "address", 
+    limit = "1",
+    citycode = filter(conslyon, !str_detect(adresse, "NA"))$COMM
   )
+list_query <- crossing(!!!query) |>
+  filter(!str_detect(q, "NA")) |>
+  pmap(list)
 
 
+
+urls <- 
+  map2(
+    .x = list_base,
+    .y = list_query,
+    .f =
+      ~ list_assign(
+        .x = .x,
+        query = .y
+      )
+    ) |>
+  map(.f = ~ url_build(.x))
+
+
+# Création des requêtes
+reqs <- 
+  map(.x = urls,
+      .f = ~ request(.))
+# Téléchargement des données
+resps <- req_perform_parallel(reqs)
+# Récupération des adresses
+adresses <- 
+  resps |>
+  map(resp_body_string) |>
+  str_c() |>
+  geojson_sf()
+
+
+### PArcelles
+urls <- paste0("https://data.geopf.fr/geocodage/reverse",
+       "?index=parcel",
+       "&lat=",
+       lonlat[,1],
+       "&lon",
+       lonlat[,2])
 
 
 
