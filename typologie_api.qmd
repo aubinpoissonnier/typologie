@@ -61,11 +61,11 @@ url <- wfs_cadastre |>
   url_build()
 
 # Téléchargement et création de l'objet spatial
-cad_lyon <- st_read(url)
+cadlyon <- st_read(url)
 
 # Transformation de l'objet (bug d'origine inconnue)
-cad_lyon <- 
-  cad_lyon %>%
+cadlyon <- 
+  cadlyon %>%
   st_cast("GEOMETRYCOLLECTION") %>%
   st_collection_extract("POLYGON")
 ```
@@ -88,7 +88,6 @@ url <-
   list_merge(
     query =
       list(
-      millesime = "2024-01",
       # Paramètres obligatoires
       withColumnName = "true",
       withColumnDescription = "false",
@@ -203,7 +202,7 @@ res_parc <-
         "ID" = .y))
 
 ### On ne garde que les constructions dont on a retrouvé la localisation
-res_parc <- res_parc[map(res_parc, length) == 15] %>%
+res_parc <- res_parc[map(res_parc, length) == 14] %>%
   bind_rows()
 
 # Géocodage par l'adresse
@@ -232,7 +231,8 @@ res_adr <-
         # La colonne de l'identifiant
         "ID" = .y))
 
-res_adr <- res_adr %>%
+res_adr <- 
+  res_adr[map(res_adr, length) == 20] %>%
   bind_rows() %>%
   filter(properties.type == "housenumber")
 
@@ -250,6 +250,15 @@ conslyon <-
   left_join(conslyon,
           res, 
           by = "ID")
+
+### Objet spatial
+conslyon <- 
+  conslyon %>%
+  unnest_wider(geometry.coordinates,
+               names_sep = "_") %>%
+  filter(!is.na(geometry.coordinates_1)) %>%
+  st_as_sf(coords = c("geometry.coordinates_1", 
+                      "geometry.coordinates_2"))
 ```
 
 # DVF
@@ -311,13 +320,99 @@ dvflyon <-
   map_chr(resp_body_string) |>
   str_c() |>
   geojson_sf()
+```
 
-dvflyon %>%
-  count(idopendata)
+```{r}
+
+mf_map(cadlyon)
+mf_map(dvflyon, add = T)
+mf_map(filter(conslyon, NB_LGT_COL_HORS_RES > 5), add = T)
+
+```
+
+```{r}
+dvflyon2 <-
+  dvflyon %>%
+  mutate(par = str_remove_all(l_idpar, "[^a-zA-Z0-9]"))
+
+conslyon2 <- 
+  conslyon %>%
+  mutate(
+    par1 = 
+      paste0(
+        DEP_CODE,
+        str_sub(NUM_DAU, 4, 6),
+        "000",
+    # Section cadastrale
+    SEC_CADASTRE1,
+    # Numéro
+    str_pad(NUM_CADASTRE1, width = 4, pad = "0")),
+    par2 = 
+      paste0(
+        DEP_CODE,
+        str_sub(NUM_DAU, 4, 6),
+        "000",
+    # Section cadastrale
+    SEC_CADASTRE2,
+    # Numéro
+    str_pad(NUM_CADASTRE2, width = 4, pad = "0")),
+    par3 = 
+      paste0(
+        DEP_CODE,
+        str_sub(NUM_DAU, 4, 6),
+        "000",
+    # Section cadastrale
+    SEC_CADASTRE3,
+    # Numéro
+    str_pad(NUM_CADASTRE3, width = 4, pad = "0")))
+
+table(conslyon2$par1 %in% dvflyon2$par)
+table(conslyon2$par2 %in% dvflyon2$par)
+table(conslyon2$par3 %in% dvflyon2$par)
+```
+
+```{r}
+
+conslyon2 <- conslyon2 %>%
+  mutate(OUI = par1 %in% dvflyon2$par) %>%
+  filter(!OUI &
+          str_detect(NUM_DAU, "69387"))
+dvflyon2 <- dvflyon2 %>%
+  mutate(OUI = par %in% conslyon2$par1) %>%
+  filter(!OUI &
+           str_detect(l_codinsee, "69387"))
 
 
-mf_map(filter(arr, nom_arr == "LYON 4EME"))
-mf_map(lyon1, add = T)
-mf_map(filter(sf_conslyon, str_detect(NUM_DAU, "384") & NB_LGT_COL_HORS_RES > 5), add = T)
 
+
+mf_map(cadlyon)
+mf_map(dvflyon2[5,], add = T,
+       col = "red")
+mf_map(filter(conslyon2, par1 == dvflyon2[5,]$par), add = T)
+
+
+mf_map(
+  st_buffer(
+    filter(conslyon, NB_LGT_COL_HORS_RES > 5),
+    dist = 0.002), 
+  add = T)
+
+locator()
+
+conslyon2 %>%
+filter(str_detect(par1, "CK"))
+
+
+
+mf_map(filter(cadlyon, code_arr == 387))
+mf_map(dvflyon2, add = T,
+       col = "red")
+mf_map(conslyon2,
+      cex = 0.5,
+      col = "blue",
+      add = T)
+
+conslyon2$par1
+
+t <- conslyon %>% filter(NUM_DAU == "0693871700136")
 ```
