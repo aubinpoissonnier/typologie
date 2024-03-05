@@ -1,0 +1,138 @@
+---
+title: "typologie_dvf3"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+# Package names
+packages <- c("httr2", "tidyverse", "jsonlite", "sf", "geojsonsf", "mapsf")
+
+# Install packages not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed_packages])
+}
+
+# Packages loading
+invisible(lapply(packages, library, character.only = TRUE))
+```
+
+# Fonds de carte parcellaire
+
+L'obtention du fond de carte est réalisée à l'aide du flux WFS du produit IGN PARCELAIRE-EXPRESS. Il faut pour cela construire une URL composée de :
+
+-   Le service en ligne d'accès au flux
+
+-   Une requête `GetFeature` pour indiquer qu'on souhaite obtenir le contenu
+
+-   Spécifier le produit recherché : CADASTRALPARCELS.PARCELLAIRE_EXPRESS:feuille
+
+-   En projection sous le système de coordonnées de référence EPSG:4326
+
+-   Un filtre CQL qui ne sélectionne que les entités dont l'attribut `code_insee` est égal au code INSEE de la commune, soit pour la commune de Lyon `69123`
+
+```{r}
+# Base de l'url
+wfs_cadastre <- "https://data.geopf.fr/wfs/ows"
+
+# Construction de l'url
+# Partant de la base
+url <- wfs_cadastre |> 
+  # Décomposée sous un format liste
+  url_parse() |>
+  # À laquelle on rajoute les éléments supplémentaires
+  list_merge(
+    # Les requêtes
+    query = 
+      list(
+        service = "wfs",
+        version = "2.0.0",
+        request = "GetFeature",
+        typename = "CADASTRALPARCELS.PARCELLAIRE_EXPRESS:feuille",
+        srsName = "EPSG:4326",
+        CQL_FILTER = "code_insee=69123"),
+  ) |>
+  # Compilation des éléments de l'url
+  url_build()
+
+# Téléchargement et création de l'objet spatial
+cadlyon <- st_read(url)
+
+# Transformation de l'objet (bug d'origine inconnue)
+cadlyon <- 
+  cadlyon %>%
+  st_cast("GEOMETRYCOLLECTION") %>%
+  st_collection_extract("POLYGON") %>%
+  st_transform(2154)
+```
+
+
+
+
+# Données DV3F
+
+Chargement des données DV3F à partir du stockage MiniO
+
+```{r}
+# Chargement
+dvf69 <- 
+  aws.s3::s3read_using(
+    FUN = data.table::fread,
+    object = "ventes_dv3f_rhone.csv",
+    bucket = "aubinpoissonnier",
+    opts = list("region" = "")
+  )
+
+# Bug pour la géométrie
+dvf69geom <-
+  st_as_sfc(
+    structure(
+      as.character(dvf69$geompar),
+      class = "WKB"),
+    EWKB=TRUE)
+
+dvf69 <- st_set_geometry(dvf69, dvf69geom)
+```
+
+## Filtre du neuf
+
+```{r}
+dvflyon <-
+  dvf69 %>%
+  filter(str_starts(codtypbien, "1211"))
+  
+dvflyon_neuf <- 
+  dvf69 %>%
+  filter(str_starts(codtypbien, "1211|1212"))
+
+
+
+dvflyon_neuf %>%
+  count(codtypbien)
+```
+
+
+```{r}
+mf_map(cadlyon)
+mf_map(dvflyon_neuf, add = T,
+       col = "red")
+
+dvflyon_neuf %>%
+  count(l_artcgi)
+
+names(dvflyon_neuf)
+table(dvflyon_neuf$HLM)
+
+dvflyon_neuf$batiment
+dvflyon_neuf
+
+table(dvflyon$l_artcgi, dvflyon$codtypbien, useNA = "always")
+table(dvflyon$l_artcgi, dvflyon$codtypprov,  useNA = "always")
+table(dvflyon$nblocneuf, dvflyon$ffnbpgarag)
+table(dvflyon$ffnblocapt)
+table(dvflyon$ffnblocact)
+```
+
