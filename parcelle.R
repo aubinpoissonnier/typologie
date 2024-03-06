@@ -52,6 +52,11 @@ conslyon <-
   filter(str_starts(CAT_DEM, "3") &
            NB_LGT_COL_HORS_RES > 4)
 
+# Identifiants
+conslyon <-
+  conslyon %>%
+  rowid_to_column(var = "id")
+
 #### DVF ####
 # Base de l'url
 dvf_open <- "https://apidf-preprod.cerema.fr/dvf_opendata/geomutations/"
@@ -96,7 +101,15 @@ reqs <-
       .f = ~ request(.))
 # Téléchargement des données
 resps <- 
-  req_perform_sequential(reqs)
+  req_perform_parallel(reqs,
+                       pool = 10)
+
+reqs_c <- split(reqs, seq(1, 162, 20))
+resps <- 
+  map(.x = reqs_c,
+    .f = ~ req_perform_parallel(.))
+resps <- unlist(resps, recursive = F)
+
 
 dvflyon <- 
   resps |>
@@ -108,7 +121,7 @@ dvflyon <-
   dvflyon %>%
   mutate(parc = str_remove_all(l_idpar, "[^a-zA-Z0-9]"))
 
-###
+#### Conslyon ####
 conslyon <- 
   conslyon %>%
   mutate(
@@ -164,74 +177,136 @@ conslyon <-
         ADR_LIBVOIE_TER,
         # Sinon cherche le numéro dans la colonne
         paste0(ADR_NUM_TER, " ", ADR_LIBVOIE_TER)
-      )
+      ),
+    # On ne cherche pas les constructions sans numéro de rue
+    adresse = if_else(str_detect(adresse, "NA"), NA, adresse)
   )
-
-
-
-
 
 # Construction de l'url
 # Partant de la base
-
-
 # Base de l'url
-base <- "https://wxs.ign.fr/essentiels/geoportail/geocodage/rest/0.1/search?q="
-list_base <-
-  map(rep(base, 310),
-      .f = ~ url_parse(.x))
-
-query <- 
-  list(
-    q = filter(conslyon, !str_detect(adresse, "NA"))$adresse,
-    index = "address", 
-    limit = "1",
-    citycode = filter(conslyon, !str_detect(adresse, "NA"))$COMM
-  )
-list_query <- crossing(!!!query) |>
-  filter(!str_detect(q, "NA")) |>
-  pmap(list)
-
-
-
-urls <- 
-  map2(
-    .x = list_base,
-    .y = list_query,
-    .f =
-      ~ list_assign(
-        .x = .x,
-        query = .y
+conslyon <-
+  conslyon %>%
+  mutate(
+    base_url_adr = "https://wxs.ign.fr/essentiels/geoportail/geocodage/rest/0.1/search?q=",
+    url_parc_adr = 
+      paste0(
+        base_url_adr,
+        adresse,
+        "&index=address",
+        "&limit=1",
+        "&citycode=",
+        COMM,
+        "&type=housenumber"
       )
-    ) |>
-  map(.f = ~ url_build(.x))
+    )
 
 
 # Création des requêtes
 reqs <- 
-  map(.x = urls,
-      .f = ~ request(.))
+  map(conslyon$url_parc_adr,
+      url_parse) |>
+  map(url_build) |>
+  map(request)
+
 # Téléchargement des données
-resps <- req_perform_parallel(reqs)
+resps <- req_perform_parallel(reqs,
+                              on_error = "continue")
 # Récupération des adresses
-adresses <- 
+
+httr2class <- 
+  function(resp) {
+    class(resp)[[1]] != "httr2_response"
+  }
+
+
+resps <- 
   resps |>
-  map(resp_body_string) |>
+  map_if(
+    .p = httr2class,
+    .f = pluck("resp")) |>
+  map(resp_body_string) %>%
+  tibble() |>
+  rowid_to_column() |>
+  filter(!str_detect(., '"code":400') &
+           !str_detect(., "\\[\\]"))
+
+adresses <- resps$. |>
   str_c() |>
   geojson_sf()
 
+adresses$id <- resps$rowid
 
-### PArcelles
+
+# Coordonnées
+lonlat <-
+  st_coordinates(adresses)
+
+### Parcelles
 urls <- paste0("https://data.geopf.fr/geocodage/reverse",
        "?index=parcel",
-       "&lat=",
+       "&lon=",
        lonlat[,1],
-       "&lon",
-       lonlat[,2])
+       "&lat=",
+       lonlat[,2],
+       "&limit=3")
+
+reqs <- 
+  map(.x = urls,
+      .f = ~ request(.))
+resps <- req_perform_parallel(reqs)
+
+parcelles <-
+  resps |>
+  map(resp_body_string) %>%
+  map(geojson_sf) |>
+  list_rbind(names_to = "id") %>%
+  mutate(parc_adr = 
+           paste0(
+             departmentcode,
+             districtcode,
+             oldmunicipalitycode,
+             section,
+             number
+           ))
+
+parcelles <- parcelles |>
+  select(id, parc_adr) |>
+  mutate(rank = row_number(),
+         .by = id) |>
+  pivot_wider(values_from = parc_adr,
+              names_from = rank,
+              names_prefix = "parc_adr")
 
 
+adresses <- 
+  adresses |>
+  tibble() |>
+  select(id) |>
+  cbind(
+    select(
+      parcelles,
+      parc_adr1:parc_adr3
+    )
+  )
 
 
+conslyon <-
+  conslyon |>
+  left_join(
+    adresses
+  )
+
+head(conslyon |>
+       filter(!pres_parc) |>
+       select(parc_adr1:parc_adr3, parc_sufcad1:parc_sufcad3),
+     n = 50)
+
+t <-
+  conslyon %>%
+  filter(parc_sufcad1 == "69381000AK0072")
+
+conslyon$parc
 ## Jointure
 conslyonj <-
   conslyon %>%
