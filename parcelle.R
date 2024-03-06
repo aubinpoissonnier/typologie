@@ -107,7 +107,7 @@ resps <-
 reqs_c <- split(reqs, seq(1, 162, 20))
 resps <- 
   map(.x = reqs_c,
-    .f = ~ req_perform_parallel(.))
+      .f = ~ req_perform_parallel(.))
 resps <- unlist(resps, recursive = F)
 
 
@@ -199,7 +199,7 @@ conslyon <-
         COMM,
         "&type=housenumber"
       )
-    )
+  )
 
 
 # Création des requêtes
@@ -244,12 +244,12 @@ lonlat <-
 
 ### Parcelles
 urls <- paste0("https://data.geopf.fr/geocodage/reverse",
-       "?index=parcel",
-       "&lon=",
-       lonlat[,1],
-       "&lat=",
-       lonlat[,2],
-       "&limit=3")
+               "?index=parcel",
+               "&lon=",
+               lonlat[,1],
+               "&lat=",
+               lonlat[,2],
+               "&limit=3")
 
 reqs <- 
   map(.x = urls,
@@ -306,7 +306,13 @@ t <-
   conslyon %>%
   filter(parc_sufcad1 == "69381000AK0072")
 
-conslyon$parc
+
+
+
+#### Cadastre ####
+
+
+
 ## Jointure
 conslyonj <-
   conslyon %>%
@@ -320,23 +326,23 @@ dvflyonj <-
 imm <- 
   rbind(
     left_join(
-    conslyonj,
-    dvflyonj,
-    by = c("parc_sufcad1" = "parc"),
-    keep = T
-  ),
-  left_join(
-    conslyonj,
-    dvflyonj,
-    by = c("parc_sufcad2" = "parc"),
-    keep = T
-  ),
-  left_join(
-    conslyonj,
-    dvflyonj,
-    by = c("parc_sufcad3" = "parc"),
-    keep = T
-  )
+      conslyonj,
+      dvflyonj,
+      by = c("parc_sufcad1" = "parc"),
+      keep = T
+    ),
+    left_join(
+      conslyonj,
+      dvflyonj,
+      by = c("parc_sufcad2" = "parc"),
+      keep = T
+    ),
+    left_join(
+      conslyonj,
+      dvflyonj,
+      by = c("parc_sufcad3" = "parc"),
+      keep = T
+    )
   )
 
 
