@@ -101,8 +101,7 @@ reqs <-
       .f = ~ request(.))
 # Téléchargement des données
 resps <- 
-  req_perform_parallel(reqs,
-                       pool = 10)
+  req_perform_sequential(reqs)
 
 reqs_c <- split(reqs, seq(1, 162, 20))
 resps <- 
@@ -302,12 +301,13 @@ head(conslyon |>
        select(parc_adr1:parc_adr3, parc_sufcad1:parc_sufcad3),
      n = 50)
 
-t <-
-  conslyon %>%
-  filter(parc_sufcad1 == "69381000AK0072")
 
 
+conslyon |>
+  filter(!pres_parc)
 
+
+dfi <- read_csv2("dfi_lyon.csv")
 
 #### Cadastre ####
 
